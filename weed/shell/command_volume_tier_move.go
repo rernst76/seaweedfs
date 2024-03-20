@@ -5,15 +5,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"path/filepath"
+	"sync"
+	"time"
+
 	"github.com/seaweedfs/seaweedfs/weed/glog"
 	"github.com/seaweedfs/seaweedfs/weed/pb"
 	"github.com/seaweedfs/seaweedfs/weed/pb/master_pb"
 	"github.com/seaweedfs/seaweedfs/weed/storage/types"
 	"github.com/seaweedfs/seaweedfs/weed/wdclient"
-	"io"
-	"path/filepath"
-	"sync"
-	"time"
 
 	"github.com/seaweedfs/seaweedfs/weed/operation"
 	"github.com/seaweedfs/seaweedfs/weed/pb/volume_server_pb"
@@ -32,9 +33,9 @@ type volumeTierMoveJob struct {
 type commandVolumeTierMove struct {
 	activeServers sync.Map
 	queues        map[pb.ServerAddress]chan volumeTierMoveJob
-	//activeServers     map[pb.ServerAddress]struct{}
-	//activeServersLock sync.Mutex
-	//activeServersCond *sync.Cond
+	// activeServers     map[pb.ServerAddress]struct{}
+	// activeServersLock sync.Mutex
+	// activeServersCond *sync.Cond
 }
 
 func (c *commandVolumeTierMove) Name() string {
@@ -53,7 +54,6 @@ func (c *commandVolumeTierMove) Help() string {
 }
 
 func (c *commandVolumeTierMove) Do(args []string, commandEnv *CommandEnv, writer io.Writer) (err error) {
-
 	tierCommand := flag.NewFlagSet(c.Name(), flag.ContinueOnError)
 	collectionPattern := tierCommand.String("collectionPattern", "", "match with wildcard characters '*' and '?'")
 	fullPercentage := tierCommand.Float64("fullPercent", 95, "the volume reaches the percentage of max volume size")
@@ -140,7 +140,7 @@ func (c *commandVolumeTierMove) Do(args []string, commandEnv *CommandEnv, writer
 		}
 		allLocations = rotateDataNodes(allLocations)
 	}
-	for key, _ := range c.queues {
+	for key := range c.queues {
 		close(c.queues[key])
 	}
 
@@ -187,6 +187,9 @@ func isOneOf(server string, locations []wdclient.Location) bool {
 func (c *commandVolumeTierMove) doVolumeTierMove(commandEnv *CommandEnv, writer io.Writer, vid needle.VolumeId, toDiskType types.DiskType, allLocations []location) (err error) {
 	// find volume location
 	locations, found := commandEnv.MasterClient.GetLocationsClone(uint32(vid))
+
+	fmt.Fprintf(writer, "DEBUG: locations: %v\n", locations)
+
 	if !found {
 		return fmt.Errorf("volume %d not found", vid)
 	}
@@ -195,11 +198,18 @@ func (c *commandVolumeTierMove) doVolumeTierMove(commandEnv *CommandEnv, writer 
 	hasFoundTarget := false
 	fn := capacityByFreeVolumeCount(toDiskType)
 	for _, dst := range allLocations {
-		if fn(dst.dataNode) > 0 && !hasFoundTarget {
+
+		capacity := fn(dst.dataNode)
+		fmt.Fprintf(writer, "DEBUG: capacity of %s: %f", dst.dataNode.Id, capacity)
+
+		if capacity > 0 && !hasFoundTarget {
+
 			// ask the volume server to replicate the volume
 			if isOneOf(dst.dataNode.Id, locations) {
+				fmt.Fprintf(writer, "DEBUG: volume %d already on server %s\n", vid, dst.dataNode.Id)
 				continue
 			}
+
 			var sourceVolumeServer pb.ServerAddress
 			for _, loc := range locations {
 				if loc.Url != dst.dataNode.Id {
@@ -207,6 +217,7 @@ func (c *commandVolumeTierMove) doVolumeTierMove(commandEnv *CommandEnv, writer 
 				}
 			}
 			if sourceVolumeServer == "" {
+				fmt.Fprint(writer, "DEBUG: sourceVolumeServer is empty!")
 				continue
 			}
 			hasFoundTarget = true
@@ -227,7 +238,6 @@ func (c *commandVolumeTierMove) doVolumeTierMove(commandEnv *CommandEnv, writer 
 }
 
 func (c *commandVolumeTierMove) doMoveOneVolume(commandEnv *CommandEnv, writer io.Writer, vid needle.VolumeId, toDiskType types.DiskType, locations []wdclient.Location, sourceVolumeServer pb.ServerAddress, dst location, ioBytePerSecond int64, replicationString *string) (err error) {
-
 	if !commandEnv.isLocked() {
 		return fmt.Errorf("lock is lost")
 	}
@@ -280,7 +290,6 @@ func (c *commandVolumeTierMove) doMoveOneVolume(commandEnv *CommandEnv, writer i
 }
 
 func collectVolumeIdsForTierChange(topologyInfo *master_pb.TopologyInfo, volumeSizeLimitMb uint64, sourceTier types.DiskType, collectionPattern string, fullPercentage float64, quietPeriod time.Duration) (vids []needle.VolumeId, err error) {
-
 	quietSeconds := int64(quietPeriod / time.Second)
 	nowUnixSeconds := time.Now().Unix()
 
